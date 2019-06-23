@@ -1,0 +1,12 @@
+[package]
+name = "mandelbrot"
+version = "0.1.0"
+authors = ["David Buret <rmotfage@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+num = "0.2.0"
+image ="0.13.0"
+crossbeam = "0.2.8"
+
+
