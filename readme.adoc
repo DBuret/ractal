@@ -1,0 +1,40 @@
+= playing with rust to draw fractals
+
+== rust cookbook
+
+=== dispatch exemple
+
+https://rust-lang-nursery.github.io/rust-cookbook/concurrency/threads.html#draw-fractal-dispatching-work-to-a-thread-pool[dispatch exemple]
+
+
+Allocate memory for output image of given width and height with ImageBuffer::new. Rgb::from_channels calculates RGB pixel values. Create ThreadPool with thread count equal to number of cores with num_cpus::get. ThreadPool::execute receives each pixel as a separate job.
+
+mpsc::channel receives the jobs and Receiver::recv retrieves them. ImageBuffer::put_pixel uses the data to set the pixel color. ImageBuffer::save writes the image to output.png.
+
+
+[source,rust]
+----
+
+include::src/dispatch.rs[]
+
+----
+
+=== complex numbers
+
+[source,rust]
+----
+extern crate num;
+
+fn main() {
+    let complex_num1 = num::complex::Complex::new(10.0, 20.0); // Must use floats
+    let complex_num2 = num::complex::Complex::new(3.1, -4.2);
+
+    let sum = complex_num1 + complex_num2;
+
+    println!("Sum: {}", sum);
+}
+----
+
+== rayon
+
+https://github.com/ProgrammingRust/mandelbrot

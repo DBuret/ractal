@@ -1,145 +1,103 @@
+
+extern crate threadpool;
 extern crate num;
-use num::Complex;
-
-use std::str::FromStr;
-
-
+extern crate num_cpus;
 extern crate image;
 
-use std::io::Write;
+#[macro_use]
+extern crate error_chain;
+extern crate threadpool;
+extern crate num;
+extern crate num_cpus;
+extern crate image;
 
-extern crate crossbeam;
+use std::sync::mpsc::{channel, RecvError};
+use threadpool::ThreadPool;
+use num::complex::Complex;
+use image::{ImageBuffer, Pixel, Rgb};
 
-use image::png::PNGEncoder;
-use image::ColorType;
-use std::fs::File;
-
-
-fn parse_pair<T: FromStr>(s: &str, separator: char) -> Option<(T, T)> {
-    match s.find(separator) {
-        None => None,
-        Some(index) => match (T::from_str(&s[..index]), T::from_str(&s[index + 1..])) {
-            (Ok(l), Ok(r)) => Some((l, r)),
-            _ => None,
-        },
+error_chain! {
+    foreign_links {
+        MpscRecv(RecvError);
+        Io(std::io::Error);
     }
 }
 
-fn parse_complex(s: &str) -> Option<Complex<f64>> {
-    match parse_pair(s, ',') {
-        Some((re, im)) => Some(Complex { re, im }),
-        None => None,
-    }
+// Function converting intensity values to RGB
+// Based on http://www.efg2.com/Lab/ScienceAndEngineering/Spectra.htm
+fn wavelength_to_rgb(wavelength: u32) -> Rgb<u8> {
+    let wave = wavelength as f32;
+
+    let (r, g, b) = match wavelength {
+        380..=439 => ((440. - wave) / (440. - 380.), 0.0, 1.0),
+        440..=489 => (0.0, (wave - 440.) / (490. - 440.), 1.0),
+        490..=509 => (0.0, 1.0, (510. - wave) / (510. - 490.)),
+        510..=579 => ((wave - 510.) / (580. - 510.), 1.0, 0.0),
+        580..=644 => (1.0, (645. - wave) / (645. - 580.), 0.0),
+        645..=780 => (1.0, 0.0, 0.0),
+        _ => (0.0, 0.0, 0.0),
+    };
+
+    let factor = match wavelength {
+        380..=419 => 0.3 + 0.7 * (wave - 380.) / (420. - 380.),
+        701..=780 => 0.3 + 0.7 * (780. - wave) / (780. - 700.),
+        _ => 1.0,
+    };
+
+    let (r, g, b) = (normalize(r, factor), normalize(g, factor), normalize(b, factor));
+    Rgb::from_channels(r, g, b, 0)
 }
 
-fn pixel_to_point(
-    bounds: (usize, usize),
-    pixel: (usize, usize),
-    upper_left: Complex<f64>,
-    lower_right: Complex<f64>,
-) -> Complex<f64> {
-    let (width, height) = (
-        lower_right.re - upper_left.re,
-        upper_left.im - lower_right.im,
-    );
-    Complex {
-        re: upper_left.re + pixel.0 as f64 * width / bounds.0 as f64,
-        im: upper_left.im - pixel.1 as f64 * height / bounds.1 as f64,
-    }
-}
+// Maps Julia set distance estimation to intensity values
+fn julia(c: Complex<f32>, x: u32, y: u32, width: u32, height: u32, max_iter: u32) -> u32 {
+    let width = width as f32;
+    let height = height as f32;
 
-fn escape_time(c: Complex<f64>, limit: u32) -> Option<u32> {
-    let mut z = Complex { re: 0.0, im: 0.0 };
-    for i in 0..limit {
+    let mut z = Complex {
+        // scale and translate the point to image coordinates
+        re: 3.0 * (x as f32 - 0.5 * width) / width,
+        im: 2.0 * (y as f32 - 0.5 * height) / height,
+    };
+
+    let mut i = 0;
+    for t in 0..max_iter {
+        if z.norm() >= 2.0 {
+            break;
+        }
         z = z * z + c;
-        if z.norm_sqr() > 4.0 {
-            return Some(i);
-        }
+        i = t;
     }
-    None
+    i
 }
 
-fn render(
-    pixel: &mut [u8],
-    bounds: (usize, usize),
-    upper_left: Complex<f64>,
-    lower_right: Complex<f64>,
-) {
-    assert!(pixel.len() == bounds.0 * bounds.1);
-
-    for row in 0..bounds.1 {
-        for column in 0..bounds.0 {
-            let point = pixel_to_point(bounds, (column, row), upper_left, lower_right);
-            pixel[row * bounds.0 + column] = match escape_time(point, 255) {
-                None => 0,
-                Some(count) => 255 - count as u8,
-            };
-        }
-    }
+// Normalizes color intensity values within RGB range
+fn normalize(color: f32, factor: f32) -> u8 {
+    ((color * factor).powf(0.8) * 255.) as u8
 }
 
-fn write_image(
-    filename: &str,
-    pixels: &[u8],
-    bounds: (usize, usize),
-) -> Result<(), std::io::Error> {
-    let output = File::create(filename)?;
+fn main() -> Result<()> {
+    let (width, height) = (1920, 1080);
+    let mut img = ImageBuffer::new(width, height);
+    let iterations = 300;
 
-    let encoder = PNGEncoder::new(output);
-    encoder.encode(
-        &pixels,
-        bounds.0 as u32,
-        bounds.1 as u32,
-        ColorType::Gray(8),
-    )?;
+    let c = Complex::new(-0.8, 0.156);
+
+    let pool = ThreadPool::new(num_cpus::get());
+    let (tx, rx) = channel();
+
+    for y in 0..height {
+        let tx = tx.clone();
+        pool.execute(move || for x in 0..width {
+                         let i = julia(c, x, y, width, height, iterations);
+                         let pixel = wavelength_to_rgb(380 + i * 400 / iterations);
+                         tx.send((x, y, pixel)).expect("Could not send data!");
+                     });
+    }
+
+    for _ in 0..(width * height) {
+        let (x, y, pixel) = rx.recv()?;
+        img.put_pixel(x, y, pixel);
+    }
+    let _ = img.save("output.png")?;
     Ok(())
-}
-// 76 800 000 000
-//   G    M    K
-
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-
-    if args.len() != 5 {
-        writeln!(
-            std::io::stderr(),
-            "Usage: mandelbrot FILE PIXELS UPPERLEFT LOWERRIGHT"
-        )
-        .unwrap();
-        writeln!(
-            std::io::stderr(),
-            "Exemple: {} mandel.png 1000X750 -1.20,0.35 -1,0.20",
-            args[0]
-        )
-        .unwrap();
-        std::process::exit(1);
-    }
-
-    let bounds = parse_pair(&args[2], 'X').expect("error parsing image dimensions");
-    let upper_left = parse_complex(&args[3]).expect("error parsing UPPERLEFT");
-    let lower_right = parse_complex(&args[4]).expect("error parsing LOWERRIGHT");
-
-    let mut pixels = vec![0; bounds.0 * bounds.1];
-
-    //render(&mut pixels, bounds, upper_left, lower_right);
-
-    let threads = 4;
-    let rows_per_band = bounds.1 / threads + 1;
-    {
-        let bands: Vec<&mut [u8]> = pixels.chunks_mut(rows_per_band * bounds.0).collect();
-        crossbeam::scope(|spawner| {
-            for (i, band) in bands.into_iter().enumerate() {
-                let top = rows_per_band * i;
-                let height = band.len() / bounds.0;
-                let band_bounds = (bounds.0, height);
-                let band_upper_left = pixel_to_point(bounds, (0, top), upper_left, lower_right);
-                let band_lower_right =
-                    pixel_to_point(bounds, (bounds.0, top + height), upper_left, lower_right);
-                spawner.spawn(move || {
-                    render(band, band_bounds, band_upper_left, band_lower_right);
-                });
-            }
-        })
-    }
-    write_image(&args[1], &pixels, bounds).expect("error writing PNG file");
 }
